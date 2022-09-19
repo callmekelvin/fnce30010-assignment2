@@ -7,8 +7,9 @@ from fmclient import Order, OrderSide, OrderType
 
 from enum import Enum
 import numpy as np
-from itertools import permutations
+from itertools import permutations, combinations
 from datetime import datetime
+import math
 
 # Submission details
 SUBMISSION = {"student_number": "1080783", "name": "Calvin Ho"}
@@ -57,7 +58,20 @@ class CAPMBot(Agent):
         self.asset_variances = None
         self.asset_covariances = None
 
-        # each market should have its own dictionary to store orders
+        # refers to current portfolio performance => including pending trades
+        self.current_performance = None
+
+        # refers to self.current_performance + proposed_trade
+        self.potential_performance = None
+
+        # sent order dictionary
+        self.sent_order_dict = {}
+
+        # pending orders dictionary
+        self.pending_order_dict = {}
+
+        # traded orders dictionary
+        self.traded_order_dict = {}
 
     def initialised(self):
         # Extract payoff distribution for each security
@@ -72,6 +86,89 @@ class CAPMBot(Agent):
         self.inform(f"Market Information: {self._market_ids}")
         self.inform("Bot initialised, I have the payoffs for the states.")
 
+    def _calculate_performance(self, units, cash):
+        # Expected Payoff and Payoff Variance
+        expected_payoff = cash
+        payoff_variance = 0
+
+        for unit in units.keys():
+            expected_payoff += units[unit] * (self.unit_asset_payoffs[unit])
+            payoff_variance += math.pow(units[unit], 2) * self.asset_variances[unit]
+
+        all_cov_comb = combinations(units.keys(), 2)
+
+        for security_comb in all_cov_comb:
+            payoff_variance += \
+                2 * units[security_comb[0]] * units[security_comb[1]] * self.asset_covariances[security_comb]
+
+        performance = expected_payoff - (self._risk_penalty * payoff_variance)
+
+        # self.inform(f"Expected Payoff: {expected_payoff}")
+        # self.inform(f"Payoff Variance: {payoff_variance}")
+        # self.inform(f"Performance: {performance}")
+
+        return performance
+
+    def _calculate_current_performance(self, potential_order=None):
+        """
+        Calculates the performance => when there is a potential order and when there isn't
+        :param potential_order:
+        :return:
+        """
+
+        # calculate current portfolio performance => including pending trades
+
+        # start with settled holdings and settled cash
+        current_performance_cash = (self.cash * CONVERT_TO_DOLLARS)
+        current_performance_holdings = self.units_holdings.copy()
+
+        # Include pending trades => make changes based off pending cash transactions and units
+        # As we expect these pending orders to be traded
+        # for order in self.pending_order_dict.values():
+        #     if order.order_side == OrderSide.SELL:
+        #         current_performance_cash += (order.price * CONVERT_TO_DOLLARS)
+        #         current_performance_holdings[order.trade_market_id.item] = \
+        #             current_performance_holdings[order.trade_market_id.item] - 1
+        #
+        #     elif order.order_side == OrderSide.BUY:
+        #         current_performance_cash -= (order.price * CONVERT_TO_DOLLARS)
+        #         current_performance_holdings[order.trade_market_id.item] = \
+        #             current_performance_holdings[order.trade_market_id.item] + 1
+        #
+        # self.inform(f"Current Performance Holdings (after pending): {current_performance_holdings}")
+
+
+        # if we are calculating the potential performance => include the effects of the potential order
+        # On next test, remove the safeguards:
+        # Remove: current_performance_cash >= potential_order.price * CONVERT_TO_DOLLARS:
+        # Remove: current_performance_holdings[potential_order.market.item] > 0:
+        if potential_order:
+            # if the order from the market is sell => our order will be to buy
+            if potential_order.order_side == OrderSide.SELL and \
+                    current_performance_cash >= potential_order.price * CONVERT_TO_DOLLARS:
+                current_performance_cash -= (potential_order.price * CONVERT_TO_DOLLARS)
+                current_performance_holdings[potential_order.market.item] = \
+                    current_performance_holdings[potential_order.market.item] + 1
+
+            # if the order from the market is buy => our order will be to sell
+            elif potential_order.order_side == OrderSide.BUY and \
+                    current_performance_holdings[potential_order.market.item] > 0:
+                current_performance_cash += (potential_order.price * CONVERT_TO_DOLLARS)
+                current_performance_holdings[potential_order.market.item] = \
+                    current_performance_holdings[potential_order.market.item] - 1
+
+            else:
+                self.inform(f"Can't trade this potential order")
+
+        if potential_order:
+            self.inform(f"Current Performance Holdings: {current_performance_holdings}")
+            self.inform(f"Current Performance Holdings (with potential order): {current_performance_holdings}")
+
+        # calculate performance
+        current_performance = self._calculate_performance(current_performance_holdings, current_performance_cash)
+
+        return current_performance
+
     def get_potential_performance(self, orders):
         """
         Returns the portfolio performance if the given list of orders is executed.
@@ -80,7 +177,10 @@ class CAPMBot(Agent):
         :param orders: list of orders
         :return:
         """
-        pass
+
+        potential_performance = self._calculate_current_performance(orders)
+
+        return potential_performance
 
     def is_portfolio_optimal(self):
         """
@@ -90,28 +190,158 @@ class CAPMBot(Agent):
         pass
 
     def order_accepted(self, order):
-        pass
+        for order_ref, sent_order in self.sent_order_dict.items():
+            if order.ref == order_ref:
+                # remove from sent list, add to pending list
+                self.sent_order_dict[order_ref].order_status = OrderStatus(1)
+
+                self.pending_order_dict[order_ref] = self.sent_order_dict[order_ref]
+                self.sent_order_dict.pop(order_ref)
+                break
 
     def order_rejected(self, info, order):
-        pass
+        for order_ref, sent_order in self.sent_order_dict.items():
+            if order.ref == order_ref:
+                # remove from sent list
+
+                self.sent_order_dict[order_ref].order_status = OrderStatus(3)
+                self.sent_order_dict.pop(order.ref)
+                break
+
+    def _take_performance_improvement(self, order):
+        # Perform a check to ensure outstanding units pending in a market is less than maximum units you can put through
+        # This applies to both order sides in a single market
+
+        no_outstanding_orders = 0
+        for pending_order in self.pending_order_dict.values():
+            if pending_order.trade_market_id == order.market:
+                no_outstanding_orders += 1
+
+        for sent_order in self.sent_order_dict.values():
+            if sent_order.trade_market_id == order.market:
+                no_outstanding_orders += 1
+
+        if no_outstanding_orders >= order.market.max_units:
+            return
+
+        # NEED TO REVIEW USE OF CASH_AVAILABLE AND UNITS HOLDING AVAILABLE
+        if order.order_side == OrderSide.SELL:
+            if self.cash_available >= order.price:
+                new_order = _CurrentOrder(order.price, OrderSide.BUY, order.market, self)
+                self.sent_order_dict[new_order.ref] = new_order
+            else:
+                self.inform(f"Insufficient funds to take performance improvement")
+
+        elif order.order_side == OrderSide.BUY:
+            if self.units_available_holdings[order.market.item] >= 0:
+                new_order = _CurrentOrder(order.price, OrderSide.SELL, order.market, self)
+                self.sent_order_dict[new_order.ref] = new_order
+            else:
+                self.inform(f"Insufficient units of "
+                            f"{order.market.item} to take performance improvement")
 
     def received_orders(self, orders: List[Order]):
-        # get all outstanding orders within the order book
-        # run each order against the get_potential_performance() function to get potential performance
-        # if potential performance > current performance => trade this order
+        # is_portfolio_optimal function logic => bot in reactive mode
 
-        # if there was an instance where potential performance > current performance
-        # is_portfolio_optimal should return False
+        # portfolio_optimal_flag = True
 
-        pass
+        # calculate current_performance => current asset holdings + pending orders
+        self._print_my_orders()
+
+        for order_id, order in Order.all().items():
+            # update my order statuses
+            self._update_trade_status(order)
+
+            # if the public order is pending and not our order
+            if order.is_pending and not order.mine:
+                # potential performance => current asset holdings + potential order
+                potential_performance = self.get_potential_performance(order)
+                self.current_performance = self._calculate_current_performance()
+
+                self.inform(f"Current Order: {order}; Current Performance: {self.current_performance},"
+                            f" Potential Performance: {potential_performance}")
+                self.inform(" ")
+
+                # if the potential order improves performance => trade it
+                # this also means that the current portfolio is not optimal
+                if potential_performance > self.current_performance:
+
+                    self._take_performance_improvement(order)
+                    # portfolio_optimal_flag = False
+                    break
+
+        # if there is no cash and only asset holding is notes => sell notes to get cash (MIGHT ALSO BE HANDLED?)
+
+        # if portfolio is optimal => switch bot to proactive mode (create its own performance improving orders)
+        # if portfolio_optimal_flag:
+        #     # randomly pick an asset market
+
+    def _print_my_orders(self):
+        self.inform(" ")
+        self.inform(f"Log Order Process:")
+        self.inform(f"Sent Order Dict: {self.sent_order_dict}")
+        self.inform(f"Pending Order Dict: {self.pending_order_dict}")
+        self.inform(f"Traded Order Dict: {self.traded_order_dict}")
+
+    def _update_trade_status(self, order):
+        """
+        Code Adapted from Project 1: Task 1
+        Update Status of Orders => Check to see if they have been accepted or cancelled
+
+        Update the trade status order of pending orders => remove orders that are accepted/ cancelled
+        :return:
+        """
+
+        # update pending order dictionary
+        for order_ref, pending_order in self.pending_order_dict.items():
+            # order cancelled
+            if order.ref == order_ref and order.is_cancelled and order.mine:
+                # remove from pending list
+
+                self.pending_order_dict[order_ref].order_status = OrderStatus(4)
+                self.pending_order_dict.pop(order.ref)
+                break
+
+            # order traded
+            elif order.ref == order_ref and order.traded_order is not None and order.mine:
+                # remove from pending list and transfer to traded list
+
+                self.pending_order_dict[order_ref].order_status = OrderStatus(2)
+                self.traded_order_dict[order.ref] = self.pending_order_dict[order_ref]
+                self.pending_order_dict.pop(order.ref)
+                break
 
     def received_session_info(self, session: Session):
         if session.is_open:
             self.inform("Market is open")
 
             # reset all variables between sessions
-            # DO RESET HERE
-            pass
+            # DO RESET HERE => NOT ALL VARIABLES ARE HERE YET
+            self.cash_available = None
+            self.cash = None
+            self.units_available_holdings = {}
+            self.units_holdings = {}
+
+            self.current_performance = None
+            self.sent_order_dict = {}
+            self.pending_order_dict = {}
+            self.traded_order_dict = {}
+
+            # If payoffs have changed while market was closed => recalculate
+            recalculation_required = False
+
+            for market_id, market_info in self.markets.items():
+                security = market_info.item
+                description = market_info.description
+                new_payoffs = [int(a) for a in description.split(",")]
+
+                if np.array_equal(self._payoffs[security], new_payoffs):
+                    recalculation_required = True
+
+            if recalculation_required:
+                self._pre_calculate_payoffs_and_variance()
+
+            self.inform("Bot initialised, I have the payoffs for the states.")
 
         elif session.is_closed:
             self.inform("Market is closed")
@@ -160,9 +390,11 @@ class CAPMBot(Agent):
             self.units_available_holdings[market_id.item] = asset.units_available
             self.units_holdings[market_id.item] = asset.units
 
+        self.inform(" ")
+        self.inform(f"Received Holdings:")
         self.inform(f"Cash Available: {self.cash_available}; Cash: {self.cash}")
-        self.inform(self.units_holdings)
-        self.inform(self.units_available_holdings)
+        self.inform(f"Unit Holdings: {self.units_holdings}")
+        self.inform(f"Unit Available Holdings {self.units_available_holdings}")
 
 
 class _CurrentOrder:
@@ -178,7 +410,7 @@ class _CurrentOrder:
         self.trade_market_id = trade_market_id
         self.order_status = None
         self.date_created = datetime.now()
-        self.ref = f"Market-{self.trade_market_id}-Price-{self.price}-OrderSide-{self.order_side}" \
+        self.ref = f"Asset-{self.trade_market_id.item}-Price-{self.price}-OrderSide-{self.order_side}" \
                    f"-[{SUBMISSION['student_number']}]-{self.date_created}"
 
         capm_bot.send_order(self._create_order())
