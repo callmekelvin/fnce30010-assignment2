@@ -1,0 +1,19 @@
+FNCE30001 - Assignment 2 Feedback
+
+Student Number: 1080783
+Parameters [1/1]
+Trading style [2/2]
+
+Performance measurement [4/4]
+
+Order management [4/5]
+- Bot does not sell notes at a discount to raise cash
+- Bot (very rarely) trades to reduce performance
+[2022-10-16 09:44:46,570:            agent.CAPM Bot]:     INFO - Performance: 136.62687499999998
+[2022-10-16 09:44:46,774:            agent.CAPM Bot]:     INFO - Performance: 136.46249999999998
+
+Code quality [3/3]
+- Good
+
+Total [14/15]
+Nitin Yadav , Oct 19 at 10:20
