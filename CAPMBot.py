@@ -34,7 +34,7 @@ class OrderStatus(Enum):
 
 class CAPMBot(Agent):
 
-    def __init__(self, account, email, password, marketplace_id, risk_penalty=0.001, session_time=20):
+    def __init__(self, account, email, password, marketplace_id, risk_penalty=0.007, session_time=20):
         """
         Constructor for the Bot
         :param account: Account name
@@ -59,36 +59,32 @@ class CAPMBot(Agent):
         self.asset_variances = None
         self.asset_covariances = None
 
-        # refers to current portfolio performance => including pending trades
         self.current_performance = None
-
-        # refers to self.current_performance + proposed_trade
         self.potential_performance = None
 
-        # sent order dictionary
         self.sent_order_dict = {}
-
-        # pending orders dictionary
         self.pending_order_dict = {}
-
-        # traded orders dictionary
         self.traded_order_dict = {}
 
     def initialised(self):
-        # Extract payoff distribution for each security
-        # Extract information about each market
+        """
+        Extract payoff distribution for each security and extract information about each market
+        """
         for market_id, market_info in self.markets.items():
             security = market_info.item
             description = market_info.description
             self._payoffs[security] = [int(a) for a in description.split(",")]
             self._market_ids[market_id] = market_info
 
-        self.inform(f"Payoffs: {self._payoffs}")
-        self.inform(f"Market Information: {self._market_ids}")
         self.inform("Bot initialised, I have the payoffs for the states.")
 
     def _calculate_performance(self, units, cash):
-        # Expected Payoff and Payoff Variance
+        """
+        Raw Calculation of Performance by calculating Expected Payoff and Payoff Variance
+        :param units:
+        :param cash:
+        :return:
+        """
         expected_payoff = cash
         payoff_variance = 0
 
@@ -104,47 +100,21 @@ class CAPMBot(Agent):
 
         performance = expected_payoff - (self._risk_penalty * payoff_variance)
 
-        # self.inform(f"Expected Payoff: {expected_payoff}")
-        # self.inform(f"Payoff Variance: {payoff_variance}")
-        # self.inform(f"Performance: {performance}")
-
         return performance
 
     def _calculate_current_performance(self, potential_order=None, order_item=None, order_price=None, order_side=None):
         """
-        Calculates the performance => when there is a potential order and when there isn't
+        Calculates the performance - Based off Settled Cash/ Holdings
+        Note: Does not include the impact of pending orders
         :param potential_order:
         :return:
         """
 
-        # calculate current portfolio performance => including pending trades
-
-        # start with settled holdings and settled cash
+        # Get settled holdings and settled cash
         current_performance_cash = (self.cash * CONVERT_TO_DOLLARS)
         current_performance_holdings = self.units_holdings.copy()
 
-        # Include pending trades => make changes based off pending cash transactions and units
-        # As we expect these pending orders to be traded
-        # for order in self.pending_order_dict.values():
-        #     if order.order_side == OrderSide.SELL:
-        #         current_performance_cash += (order.price * CONVERT_TO_DOLLARS)
-        #         current_performance_holdings[order.trade_market_id.item] = \
-        #             current_performance_holdings[order.trade_market_id.item] - 1
-        #
-        #     elif order.order_side == OrderSide.BUY:
-        #         current_performance_cash -= (order.price * CONVERT_TO_DOLLARS)
-        #         current_performance_holdings[order.trade_market_id.item] = \
-        #             current_performance_holdings[order.trade_market_id.item] + 1
-        #
-        # self.inform(f"Current Performance Holdings (after pending): {current_performance_holdings}")
-
-        if potential_order:
-            self.inform(f"Current Performance Holdings: {current_performance_holdings}")
-
-        # if we are calculating the potential performance => include the effects of the potential order
-        # On next test, remove the safeguards:
-        # Remove: current_performance_cash >= potential_order.price * CONVERT_TO_DOLLARS:
-        # Remove: current_performance_holdings[potential_order.market.item] > 0:
+        # if we are calculating the potential performance by trading an order => adjust holdings and cash
         if potential_order:
             # if the order is to buy
             if order_side == OrderSide.BUY:
@@ -158,12 +128,6 @@ class CAPMBot(Agent):
                 current_performance_holdings[order_item] = \
                     current_performance_holdings[order_item] - 1
 
-            # else:
-            #     self.inform(f"Can't trade this potential order")
-
-        if potential_order:
-            self.inform(f"Current Performance Holdings (with potential order): {current_performance_holdings}")
-
         # calculate performance
         current_performance = self._calculate_performance(current_performance_holdings, current_performance_cash)
 
@@ -173,23 +137,21 @@ class CAPMBot(Agent):
         """
         Returns the portfolio performance if the given list of orders is executed.
         The performance as per the following formula:
-        Performance = ExpectedPayoff - b * PayoffVariance, where b is the penalty for risk.
+        Performance = ExpectedPayoff - b * PayoffVariance, where b is the penalty for risk
         :param orders: list of orders
         :return:
         """
-        # if the order from the market is to buy => our order would be to sell
+
+        # Gets Potential Performance if Current Orders from the Market are Traded
+        # Ex. If the order from the market is to buy => our order would be to sell to the market and vice versa
         if orders.order_side == OrderSide.BUY:
             potential_performance = \
                 self._calculate_current_performance(orders, orders.market.item, orders.price, OrderSide.SELL)
-        elif orders.order_side == OrderSide.SELL:
+        else:
             potential_performance = \
                 self._calculate_current_performance(orders, orders.market.item, orders.price, OrderSide.BUY)
 
         return potential_performance
-
-    # def _cancel_pending_orders(self):
-    #     for order_ref, sent_order in self.pending_order_dict.items():
-    #         sent_order
 
     def is_portfolio_optimal(self):
         """
@@ -197,42 +159,32 @@ class CAPMBot(Agent):
         :return:
         """
 
-        # order side, price, item name
-
-        # Assume that the portfolio is optimal unless proven otherwise
+        # Assumes that the current portfolio is optimal, unless proven otherwise
         portfolio_optimal_flag = True
-
-        # Cancelling stale orders => If we have time to implement
-        # self._cancel_pending_orders()
-
-        # debug print orders function
-        self._print_my_orders()
 
         for order_id, order in Order.all().items():
             # update my order statuses
             self._update_trade_status(order)
 
-            # if the public order is pending and not our order
+            # If the order is pending and not our order
             if order.is_pending and not order.mine:
-                # potential performance => current asset holdings + potential order
+
+                # calculate the potential performance if we traded this public order
                 potential_performance = self.get_potential_performance(order)
+
+                # calculate current performance based off settled holdings/ cash
                 self.current_performance = self._calculate_current_performance()
 
-                self.inform(f"Current Order: {order}; Current Performance: {self.current_performance},"
-                            f" Potential Performance: {potential_performance}")
-                self.inform(" ")
-
-                # if the potential order improves performance => trade it
-                # this also means that the current portfolio is not optimal
+                # if trading the public order improves performance => trade it if we can
                 if potential_performance > self.current_performance:
-                    # self._take_performance_improvement(order)
 
-                    # take opposite side of the trade
+                    # Note: Our trade will take the opposite order side of the market trade
                     if order.order_side == OrderSide.BUY:
                         self._take_performance_improvement(order.market, OrderSide.SELL, order.price)
                     elif order.order_side == OrderSide.SELL:
                         self._take_performance_improvement(order.market, OrderSide.BUY, order.price)
 
+                    # as there exists a public order that would improve our performance, our portfolio is not optimal
                     portfolio_optimal_flag = False
                     break
 
@@ -257,44 +209,16 @@ class CAPMBot(Agent):
                 self.sent_order_dict.pop(order.ref)
                 break
 
-    # def _take_performance_improvement(self, order):
-    #     # Perform a check to ensure outstanding units pending in a market is less than maximum units you can put through
-    #     # This applies to both order sides in a single market
-    #
-    #     no_outstanding_orders = 0
-    #     for pending_order in self.pending_order_dict.values():
-    #         if pending_order.trade_market_id == order.market:
-    #             no_outstanding_orders += 1
-    #
-    #     for sent_order in self.sent_order_dict.values():
-    #         if sent_order.trade_market_id == order.market:
-    #             no_outstanding_orders += 1
-    #
-    #     if no_outstanding_orders >= order.market.max_units:
-    #         return
-    #
-    #     # STILL NEED TO CHECK TICK SIZE OF ORDER AND IF ORDER IS VALID (WITHIN MAX/ MIN PRICE)
-    #
-    #     if order.order_side == OrderSide.SELL:
-    #         if self.cash_available >= order.price:
-    #             new_order = _CurrentOrder(order.price, OrderSide.BUY, order.market, self)
-    #             self.sent_order_dict[new_order.ref] = new_order
-    #         else:
-    #             self.inform(f"Insufficient funds to take performance improvement")
-    #
-    #     elif order.order_side == OrderSide.BUY:
-    #         if self.units_available_holdings[order.market.item] >= 0:
-    #             new_order = _CurrentOrder(order.price, OrderSide.SELL, order.market, self)
-    #             self.sent_order_dict[new_order.ref] = new_order
-    #         else:
-    #             self.inform(f"Insufficient units of "
-    #                         f"{order.market.item} to take performance improvement")
-
-    # REWORK IN PROGRESS => ANY SECTION WITH _take_performance_improvement IS WIP
     def _take_performance_improvement(self, order_market, order_side, order_price):
-        # Perform a check to ensure outstanding units pending in a market is less than maximum units you can put through
-        # This applies to both order sides in a single market
+        """
+        Check if we can make the performance improving order and if we can, do so
+        :param order_market:
+        :param order_side:
+        :param order_price:
+        :return:
+        """
 
+        # Ensure that pending units in orders do not exceed maximum units in orders allowed in a single market
         no_outstanding_orders = 0
         for pending_order in self.pending_order_dict.values():
             if pending_order.trade_market_id == order_market:
@@ -307,116 +231,135 @@ class CAPMBot(Agent):
         if no_outstanding_orders >= order_market.max_units:
             return
 
-        # STILL NEED TO CHECK TICK SIZE OF ORDER AND IF ORDER IS VALID (WITHIN MAX/ MIN PRICE)
+        # check if submit the order and if we can submit the order, do so
+        if order_market.min_price <= order_price <= order_market.max_price:
+            if order_side == OrderSide.BUY:
+                if self.cash_available >= order_price:
+                    new_order = _CurrentOrder(order_price, OrderSide.BUY, order_market, self)
+                    self.sent_order_dict[new_order.ref] = new_order
+                else:
+                    self.inform(f"Insufficient funds to take performance improvement")
 
-        if order_side == OrderSide.BUY:
-            if self.cash_available >= order_price:
-                new_order = _CurrentOrder(order_price, OrderSide.BUY, order_market, self)
-                self.sent_order_dict[new_order.ref] = new_order
-            else:
-                self.inform(f"Insufficient funds to take performance improvement")
-
-        elif order_side == OrderSide.SELL:
-            if self.units_available_holdings[order_market.item] >= 0:
-                new_order = _CurrentOrder(order_price, OrderSide.SELL, order_market, self)
-                self.sent_order_dict[new_order.ref] = new_order
-            else:
-                self.inform(f"Insufficient units of "
-                            f"{order_market.item} to take performance improvement")
+            elif order_side == OrderSide.SELL:
+                if self.units_available_holdings[order_market.item] >= 0:
+                    new_order = _CurrentOrder(order_price, OrderSide.SELL, order_market, self)
+                    self.sent_order_dict[new_order.ref] = new_order
+                else:
+                    self.inform(f"Insufficient units of "
+                                f"{order_market.item} to take performance improvement")
+        else:
+            self.inform(f"Order Price out of Market Price Ranges")
 
     def received_orders(self, orders: List[Order]):
         # Bot in Reactive Mode
         portfolio_optimal_flag = self.is_portfolio_optimal()
 
         # Bot in Proactive Mode
-        # If portfolio is optimal => switch bot to proactive mode (create its own performance improving orders)
         if portfolio_optimal_flag:
-            self.inform("Bot in Proactive Mode")
+            self._proactive_mode()
 
-            # randomly pick an asset market
-            random_asset_market = random.choice(list(self._market_ids.keys()))
-            random_asset_item = self._market_ids[random_asset_market].item
+    def _proactive_mode(self):
+        """
+        If portfolio is optimal => Switch bot to Proactive Mode (find our own performance improving orders)
+        Code is only run when there are no reactive performance improving opportunities
+        """
 
-            best_prices = self._get_best_bid_ask_price(random_asset_market, random_asset_item)
+        # Randomly pick an asset market
+        random_asset_market = random.choice(list(self._market_ids.keys()))
+        random_asset_item = self._market_ids[random_asset_market].item
 
-            # Determine order side
-            # if we are running low on cash => try to sell/ short sell asset to gain funds
-            if self.cash_available < best_prices["best_ask"]:
-                order_direction = OrderSide.SELL
+        # Get best bid and ask prices for that random asset market
+        best_prices = self._get_best_bid_ask_price(random_asset_market, random_asset_item)
 
-            # otherwise random order side
-            else:
-                order_direction = random.choice(list([OrderSide.BUY, OrderSide.SELL]))
+        # Determine the Order Side of Trade
+        # If we are running low on Cash => Try to sell/ short sell asset to gain funds
+        if self.cash_available < best_prices["best_ask"]:
+            order_direction = OrderSide.SELL
 
-            self.inform(f"Asset: {random_asset_item}, best_price: {best_prices}, order_side: {order_direction}")
+        # Otherwise, pick a random order side
+        else:
+            order_direction = random.choice(list([OrderSide.BUY, OrderSide.SELL]))
 
-            # price = run gradient price search
-            order_price = self._gradient_price_search(random_asset_market, best_prices, order_direction)
+        # Run gradient price search
+        self._gradient_price_search(random_asset_market, best_prices, order_direction)
 
+    def _gradient_price_search(self, market_id, best_price, order_side):
+        """
+        Search for an order price in a given market and order side that would improve portfolio performance
+        :param market_id:
+        :param best_price:
+        :param order_side:
+        :return:
+        """
 
-            # see if we can actually make the order
-            # create the order
-
-
-    def _gradient_price_search(self, market_id, best_existing_price, order_side):
-        # determine price
+        # Get market max, min price and gradient ascent/ descent price step
         max_price = self._market_ids[market_id].max_price
         min_price = self._market_ids[market_id].min_price
         price_step = self._market_ids[market_id].price_tick
 
         self.current_performance = self._calculate_current_performance()
 
-        price_movement = 0
-        price = (max_price - min_price) / 2
-
+        # Based off order side => determine if it is price ascent/ descent search and where to start price search
         if order_side == OrderSide.BUY:
             price_movement = -1
-            price = best_existing_price["best_bid"]
-
-        elif order_side == OrderSide.SELL:
+            price = best_price["best_bid"]
+        else:
             price_movement = 1
-            price = best_existing_price["best_ask"]
+            price = best_price["best_ask"]
 
-            # STILL NEED TO CHECK TICK SIZE
-
-        # STILL NEED TO CHECK TICK SIZE OF ORDER AND IF ORDER IS VALID (WITHIN MAX/ MIN PRICE)
+        # ensure price search occurs within max and min price
         while min_price <= price <= max_price:
-            price = price + (price_movement * price_step)
 
-            # NEED TO EITHER REVERSE ORDER SIDE HERE OR CHANGE THE CALCAULTE CURRENT PERFORMANCE IMPLEMENTATION
             potential_performance = self._calculate_current_performance(True, self._market_ids[market_id].item, price,
                                                                         order_side)
 
-            self.inform(f"Current Performance: {self.current_performance} "
-                        f"and Potential Performance: {potential_performance}")
-
+            # if this price improves performance, trade this order at this price
             if potential_performance > self.current_performance:
-                # take this order
 
-                # market id, market max_units, order side, order price, order_item
-                # self._take_performance_improvement(self._market_ids[market_id], order_side, price)
+                self._take_performance_improvement(self._market_ids[market_id], order_side, price)
                 break
 
+            # increment/ decrement price
+            price = price + (price_movement * price_step)
 
     def _get_best_bid_ask_price(self, asset_market, asset_item):
-        # get best bid and ask price to determine where to start gradient descent
+        """
+        Get best bid and ask price for a certain asset market to determine where to start price search
+        :param asset_market:
+        :param asset_item:
+        :return:
+        """
 
-        # assume best bid and ask price are maximum and minimum price
-        best_ask = self._market_ids[asset_market].min_price
-        best_bid = self._market_ids[asset_market].max_price
+        # Assume best bid and ask price are maximum and minimum price
+        best_ask = self._market_ids[asset_market].max_price
+        best_bid = self._market_ids[asset_market].min_price
+
+        midpoint_price = int((self._market_ids[asset_market].max_price - self._market_ids[asset_market].min_price) / 2)
 
         best_prices = {"best_bid": best_bid, "best_ask": best_ask}
 
+        # Get best bid and ask prices
         for order_id, order in Order.all().items():
             if order.is_pending and order.market.item == asset_item:
-                if order.order_side == OrderSide.BUY and order.price < best_prices["best_bid"]:
+                if order.order_side == OrderSide.BUY and order.price > best_prices["best_bid"]:
                     best_prices["best_bid"] = order.price
-                elif order.order_side == OrderSide.SELL and order.price > best_prices["best_ask"]:
+                elif order.order_side == OrderSide.SELL and order.price < best_prices["best_ask"]:
                     best_prices["best_ask"] = order.price
+
+        # If there is no existing bids for the order side => return midpoint price
+        if best_prices["best_bid"] == self._market_ids[asset_market].min_price:
+            best_prices["best_bid"] = midpoint_price
+
+        if best_prices["best_ask"] == self._market_ids[asset_market].max_price:
+            best_prices["best_ask"] = midpoint_price
 
         return best_prices
 
     def _print_my_orders(self):
+        """
+        Debug function to log the status of all orders
+        :return:
+        """
         self.inform(" ")
         self.inform(f"Log Order Process:")
         self.inform(f"Sent Order Dict: {self.sent_order_dict}")
@@ -453,21 +396,22 @@ class CAPMBot(Agent):
 
     def received_session_info(self, session: Session):
         if session.is_open:
-            self.inform("Market is open")
+            # self.inform("Market is open")
 
             # reset all variables between sessions
-            # DO RESET HERE => NOT ALL VARIABLES ARE HERE YET
             self.cash_available = None
             self.cash = None
             self.units_available_holdings = {}
             self.units_holdings = {}
 
             self.current_performance = None
+            self.potential_performance = None
+
             self.sent_order_dict = {}
             self.pending_order_dict = {}
             self.traded_order_dict = {}
 
-            # If payoffs have changed while market was closed => recalculate
+            # If payoffs have changed while market was closed => recalculate variance/ payoffs
             recalculation_required = False
 
             for market_id, market_info in self.markets.items():
@@ -475,21 +419,23 @@ class CAPMBot(Agent):
                 description = market_info.description
                 new_payoffs = [int(a) for a in description.split(",")]
 
-                if np.array_equal(self._payoffs[security], new_payoffs):
+                if not np.array_equal(self._payoffs[security], new_payoffs):
+                    self._payoffs[security] = new_payoffs
                     recalculation_required = True
 
             if recalculation_required:
                 self._pre_calculate_payoffs_and_variance()
-
-            self.inform("Bot initialised, I have the payoffs for the states.")
+                self.inform("Bot reinitialised, I have the payoffs for the states.")
 
         elif session.is_closed:
-            self.inform("Market is closed")
-            # pass
+            # self.inform("Market is closed")
+            pass
 
     def _pre_calculate_payoffs_and_variance(self):
-        """Asset Variances, Covariances and Unit Asset Payoffs can be computed as soon as payoffs in different
-        states is known. Hence, we can pre-compute these values to speed up calculation of portfolio performance."""
+        """
+        Asset Variances, Covariances and Unit Asset Payoffs can be computed as soon as payoffs in different
+        states is known. Hence, we can pre-compute these values to speed up calculation of portfolio performance.
+        """
         self.unit_asset_payoffs = {}
         self.asset_variances = {}
         self.asset_covariances = {}
@@ -498,7 +444,6 @@ class CAPMBot(Agent):
         payoff_dollars = {}
         for security, payoff in self._payoffs.items():
             payoff_dollars[security] = (np.array(payoff) * CONVERT_TO_DOLLARS).tolist()
-        # self.inform(f"Payoff in Dollars: {payoff_dollars}")
 
         # Pre-Calculate Unit Asset Payoffs and Asset Variance
         for security in self._payoffs.keys():
@@ -511,16 +456,14 @@ class CAPMBot(Agent):
         for security_comb in all_cov_comb:
             cov_pair = np.cov(payoff_dollars[security_comb[0]], payoff_dollars[security_comb[1]], bias=True)[0][1]
             self.asset_covariances[security_comb] = cov_pair
-            # self.inform(f"Covariance for {security_comb} = {cov_pair}")
 
         # Print Unit Asset Payoffs, Asset Variance and Asset Covariances
-        self.inform(f"Unit Asset Payoffs: {self.unit_asset_payoffs}")
-        self.inform(f"Asset Variance: {self.asset_variances}")
-        self.inform(f"Asset Covariance: {self.asset_covariances}")
+        # self.inform(f"Unit Asset Payoffs: {self.unit_asset_payoffs}")
+        # self.inform(f"Asset Variance: {self.asset_variances}")
+        # self.inform(f"Asset Covariance: {self.asset_covariances}")
 
     def pre_start_tasks(self):
         self._pre_calculate_payoffs_and_variance()
-        # pass
 
     def received_holdings(self, holdings):
         self.cash = holdings.cash
@@ -530,18 +473,10 @@ class CAPMBot(Agent):
             self.units_available_holdings[market_id.item] = asset.units_available
             self.units_holdings[market_id.item] = asset.units
 
-        self.inform(" ")
-        self.inform(f"Received Holdings:")
-        self.inform(f"Cash Available: {self.cash_available}; Cash: {self.cash}")
-        self.inform(f"Unit Holdings: {self.units_holdings}")
-        self.inform(f"Unit Available Holdings {self.units_available_holdings}")
-
 
 class _CurrentOrder:
     """
-    STILL NEED TO REWORK FOR USE IN TASK 2
-
-    Adapted Project 1 - Task 1 Code
+    Adapted from Project 1 - Task 1 Code
     Wrapper class to store information about an Order and provides functionality to create new orders
     """
     def __init__(self, price, order_side, trade_market_id, capm_bot):
@@ -555,11 +490,8 @@ class _CurrentOrder:
 
         capm_bot.send_order(self._create_order())
         self.order_status = OrderStatus(0)
-        # bot.inform(f"Order Sent: {self.ref}")
 
     def _create_order(self):
-        # self.inform(f"Created-Order: {self.ref}")
-
         # submit the order
         new_order = Order.create_new(self.trade_market_id)
         new_order.order_side = self.order_side
